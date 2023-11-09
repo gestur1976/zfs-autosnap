@@ -58,7 +58,7 @@ This example will run the script every hour on the hour, ensuring that `poolname
 
 The script writes its log to `/var/log/snapshots.log`. Make sure the user running the script has the necessary permissions to write to this file.
 
-# # Notes
+## Notes
 
 Before using the script, ensure that you understand the ZFS snapshot and delete operations and their impact on your system.
 This script assumes the ZFS tools are installed and the pool name provided is valid and mounted.
