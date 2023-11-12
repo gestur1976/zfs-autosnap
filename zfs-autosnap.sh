@@ -54,14 +54,15 @@ function delete_snapshot() {
 # Function to recalculate free space in the pool and convert it to GB.
 function recalculate_free_space() {
     # Extract available space for the pool.
-    free_space_pool=$(zfs list -o available "$pool" | tail -n 1 | grep -E -o '[0-9]+')
+    free_space=$(zfs list -o available "$pool" | tail -n 1)
+    free_space_amount=$(echo "$free_space" | grep -E -o '[0-9\.]+')
     # Extract the unit of the available space (e.g., T for TB).
-    free_space_unit=$(echo "$free_space_pool" | grep -E -o '[A-Z]$')
+    free_space_unit=$(echo "$free_space" | grep -E -o '[A-Z]$')
     # Convert the space to GB if necessary.
     if [[ "$free_space_unit" == "T" ]]; then
-        free_space_gb=$(echo "$free_space_pool" * 1024 | bc)
+        free_space_gb=$(echo "$free_space_amount" "*" "1024" | bc | grep -E -o '^[0-9]+')
     else
-        free_space_gb=$(echo "$free_space_pool" | bc)
+        free_space_gb=$(echo "$free_space_amount" | bc | grep -E -o '^[0-9]+')
     fi
     echo
     log_message "Available space in $pool: ${free_space_gb}G"
