@@ -12,11 +12,11 @@ PATH="/usr/bin:/usr/local/sbin:/usr/local/bin:/bin:/sbin:/var/lib/snapd/snap/bin
 
 # Set pool name using provided argument and optionally set the minimum free space threshold.
 if [ -z "$1" ]; then
-    echo "Usage: $0 <pool> [min_free_space_gb]" > /dev/stderr
+    echo "Usage: $0 <pool> [min_free_space_gb] [minimum_days_to_keep snapshots (overrides min_free_space_gb)]" > /dev/stderr
     echo > /dev/stderr
     echo "Examples:" > /dev/stderr
     echo "$0 tank 300" > /dev/stderr
-    echo "$0 tank (it defaults to 200G of free space)" > /dev/stderr
+    echo "$0 tank (it defaults to 200G of free space and a minimum of 30 days of snapshots)" > /dev/stderr
     exit 1
 fi
 
@@ -33,6 +33,14 @@ if [ -z "$2" ]; then
 else
     min_free_space_gb="$2"
 fi
+
+if [ -z "$3" ]; then
+    minimum_days_to_keep="30"
+else    
+    minimum_days_to_keep="$3"
+fi
+
+days_to_keep_epoch=$(date -d "-${minimum_days_to_keep} days" +"%s")
 
 # Function to log messages with timestamps.
 function log_message() {
@@ -81,17 +89,23 @@ function delete_old_snapshots() {
             snapshots_current_datetime=$(head -n 1 "$tmp_dir/snapshots.txt" | grep -E -o '^[0-9]+')
             # Read through the list of snapshots and delete as needed.
             while read -r snapshot_line; do
+                # Check if the snapshot is older than the minimum days to keep.
+                if [[ $(echo "$snapshot_line" | grep -E -o '^[0-9]+') -gt "$days_to_keep_epoch" ]]; then
+                    log_message "Minimum $minimum_days_to_keep days to keep exceeded."
+                    break
+                fi
                 snapshot_datetime=$(echo "$snapshot_line" | grep -E -o '^[0-9]+')
                 snapshot_name=$(echo "$snapshot_line" | grep -E -o '[^@^ ]+@[^ ]+$')
                 if [[ "$snapshot_datetime" -gt "$snapshots_current_datetime" ]]; then
                     echo
                     log_message "Checking free space..."
+                    wait
                     sleep 5
                     recalculate_free_space
                     snapshots_current_datetime="$snapshot_datetime"
                 fi
                 if [[ "$free_space_gb" -lt "$min_free_space_gb" ]]; then
-                    delete_snapshot "$snapshot_name"
+                    delete_snapshot "$snapshot_name" &
                 else
                     echo
                     log_message "Adequate free space achieved."
@@ -113,6 +127,11 @@ function main() {
     mkdir -p "$tmp_dir"
     recalculate_free_space
     delete_old_snapshots
+    if [ "$free_space_gb" -lt "$min_free_space_gb" ]; then
+        echo
+        log_message "Couldn't free up enough space by deleting old snapshots. Consider freeing some space as pool performance may be degraded."
+        log_message "Free space: ${free_space_gb}G"
+    fi
     # Create snapshots for each dataset in the pool.
     zfs list | grep -E -o "^${pool}[^ ]*" | while read -r dataset; do
         create_snapshot "$dataset" &
@@ -124,3 +143,6 @@ function main() {
 
 # Call the main function to execute the script.
 main
+
+# Let's clear tmp directory.
+rm -rf "${tmp_dir}"
