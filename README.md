@@ -33,14 +33,17 @@ sudo cp zfs-autosnap.sh /usr/local/bin/
 
 Run the script with the pool name as the first parameter and the minimum free space in GB as an optional second parameter.
 ```bash
-zfs-autosnap.sh poolname [min_free_space_gb]
+zfs-autosnap.sh poolname [min_free_space_gb] [days_to_keep_snapshots]
 ```
+If the second parameter is omitted, the script defaults to ensuring a minimum of 200 GB of free space.
+If the third parameter is omitted, the script defaults to keeping 30 days of snapshots.
 
 ## Examples:
 
 ```bash
-zfs-autosnap.sh tank 300
-zfs-autosnap.sh tank
+zfs-autosnap.sh tank 1000 60  # Deletes snapshots older than 60 days or when 1000 GB threshold is reached 
+zfs-autosnap.sh tank 300      # Deletes snapshots older than 30 days or when 300 GB threshold is reached
+zfs-autosnap.sh tank          # Deletes snapshots older than 30 days or when 200 GB threshold is reached
 ```
 
 If the second parameter is omitted, the script defaults to ensuring a minimum of 200 GB of free space.
