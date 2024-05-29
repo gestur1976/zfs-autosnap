@@ -12,11 +12,12 @@ PATH="/usr/bin:/usr/local/sbin:/usr/local/bin:/bin:/sbin:/var/lib/snapd/snap/bin
 
 # Set pool name using provided argument and optionally set the minimum free space threshold.
 if [ -z "$1" ]; then
-    echo "Usage: $0 <pool> [min_free_space_gb] [minimum_days_to_keep snapshots (overrides min_free_space_gb)]" > /dev/stderr
+    echo "Usage: $0 <pool> [min_free_space_gb] [minimum_days_to_keep snapshots (overrides min_free_space_gb)] [minimum days to keep intradiary snapshots]" > /dev/stderr
     echo > /dev/stderr
     echo "Examples:" > /dev/stderr
     echo "$0 tank 300" > /dev/stderr
-    echo "$0 tank (it defaults to 200G of free space and a minimum of 30 days of snapshots)" > /dev/stderr
+    echo "$0 tank (it defaults to 200G of free space and a minimum of 30 days of snapshots and 7 days of intradiary snapshots, freeing space in case of large files created and deleted the same day, it default to a week)" > /dev/stderr
+    echo "$0 tank 500 30 10 (Tries to keep 500Gb free for tank for 30 days removing intradiary snapshots older than 10 days)" > /dev/stderr
     exit 1
 fi
 
@@ -40,7 +41,15 @@ else
     minimum_days_to_keep="$3"
 fi
 
+if [ -z "$4" ]; then
+    minimum_days_to_keep_intradiary="7"
+else
+    minimum_days_to_keep_intradiary="$4"
+fi
+
 days_to_keep_epoch=$(date -d "-${minimum_days_to_keep} days" +"%s")
+
+days_to_keep_intradiary_epoch=$(date -d "-${minimum_days_to_keep_intradiary} days" +"%s")
 
 # Function to log messages with timestamps.
 function log_message() {
@@ -118,6 +127,27 @@ function delete_old_snapshots() {
     fi
 }
 
+function delete_intradiary_snapshots() {
+    log_message "Deleting intradiary snapshots older than ${minimum_days_to_keep_intradiary} days..."
+    # List all snapshots, sort them by creation time, and write to a file.
+    zfs list -o name | grep -Ev '^NAME$' > "${tmp_dir}/datasets.txt"
+    while read -r dataset; do
+        zfs list -t snapshot -p -o creation,name | grep -E '^[0-9]' | sort -n > "${tmp_dir}/snapshots.txt"
+        grep -E "${dataset}@[^ ]+$" "${tmp_dir}/snapshots.txt" | rev | cut -d@ -f1 | cut -dT -f2 | rev | sort | uniq > "${tmp_dir}/snapshot-dates.txt"
+        while read -r snapshots_date; do
+            grep -F "${dataset}@${snapshots_date}" "${tmp_dir}/snapshots.txt" | head -n -1 | \
+            while read -r snapshot_line; do
+                snapshot_epoch="$(echo "$snapshot_line" | grep -o -E '^[0-9]+')"
+                if [[ "$snapshot_epoch" -lt "$days_to_keep_intradiary_epoch" ]]; then
+                    snapshot="$(echo "$snapshot_line" | rev | grep -o -E "^[^@]+@[^ ]+" | rev)"
+                    log_message "Removing outdated intradiary snapshot: ${snapshot}"
+                    zfs destroy "${snapshot}"
+                fi
+            done
+        done < "${tmp_dir}/snapshot-dates.txt"
+    done < "$tmp_dir/datasets.txt"
+}
+
 # Main function to coordinate snapshot management.
 function main() {
     touch "$log_file"
@@ -126,6 +156,7 @@ function main() {
     rm -rf "${tmp_dir}"
     mkdir -p "$tmp_dir"
     recalculate_free_space
+    delete_intradiary_snapshots
     delete_old_snapshots
     if [ "$free_space_gb" -lt "$min_free_space_gb" ]; then
         echo
