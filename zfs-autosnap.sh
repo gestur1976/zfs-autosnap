@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the default PATH to include necessary directories for binary execution.
-PATH="/usr/bin:/usr/local/sbin:/usr/local/bin:/bin:/sbin:/var/lib/snapd/snap/bin"
+export PATH="/usr/bin:/usr/local/sbin:/usr/local/bin:/bin:/sbin:/var/lib/snapd/snap/bin"
 
 # This script creates a snapshot for every ZFS dataset.
 # The snapshots are formatted as follows: dataset@YYYY-MM-DDTHH-MM-SS.
@@ -10,170 +10,175 @@ PATH="/usr/bin:/usr/local/sbin:/usr/local/bin:/bin:/sbin:/var/lib/snapd/snap/bin
 
 # The script is designed to be executed as a cron job.
 
-# Set pool name using provided argument and optionally set the minimum free space threshold.
-if [ -z "$1" ]; then
-    echo "Usage: $0 <pool> [min_free_space_gb] [minimum_days_to_keep snapshots (overrides min_free_space_gb)] [minimum days to keep intradiary snapshots]" > /dev/stderr
-    echo > /dev/stderr
-    echo "Examples:" > /dev/stderr
-    echo "$0 tank 300" > /dev/stderr
-    echo "$0 tank (it defaults to 200G of free space and a minimum of 30 days of snapshots and 7 days of intradiary snapshots, freeing space in case of large files created and deleted the same day, it default to a week)" > /dev/stderr
-    echo "$0 tank 500 30 10 (Tries to keep 500Gb free for tank for 30 days removing intradiary snapshots older than 10 days)" > /dev/stderr
+# Usage information
+usage() {
+    cat <<EOF
+Usage: $0 <pool> [min_free_space_gb] [minimum_days_to_keep_snapshots] [minimum_days_to_keep_intradiary_snapshots]
+
+Examples:
+  $0 tank 300
+  $0 tank (defaults to 200GB of free space and a minimum of 30 days of snapshots, and 7 days of intradiary snapshots)
+  $0 tank 500 30 10 (Tries to keep 500GB free for tank for 30 days, removing intradiary snapshots older than 10 days)
+EOF
     exit 1
-fi
-
-# Define the log file location.
-log_file="/var/log/snapshots.log"
-# Define the temporary file path.
-tmp_dir="/tmp/snapshots-manager"
-# Get current date and time for snapshot naming.
-new_snapshots_datetime=$(date +"%Y-%m-%dT%H:%M:%S")
-
-pool="$1"
-if [ -z "$2" ]; then
-    min_free_space_gb="200"
-else
-    min_free_space_gb="$2"
-fi
-
-if [ -z "$3" ]; then
-    minimum_days_to_keep="30"
-else    
-    minimum_days_to_keep="$3"
-fi
-
-if [ -z "$4" ]; then
-    minimum_days_to_keep_intradiary="7"
-else
-    minimum_days_to_keep_intradiary="$4"
-fi
-
-days_to_keep_epoch=$(date -d "-${minimum_days_to_keep} days" +"%s")
-
-days_to_keep_intradiary_epoch=$(date -d "-${minimum_days_to_keep_intradiary} days" +"%s")
-
-# Function to log messages with timestamps.
-function log_message() {
-    echo "$(date +"%Y-%m-%dT%H:%M:%S"): $1" | tee -a "$log_file"
 }
 
-# Function to create a snapshot with the current datetime.
-function create_snapshot() {
+# Check for mandatory pool argument
+if [ -z "$1" ]; then
+    usage
+fi
+
+# Define the log file location
+LOG_FILE="/var/log/snapshots.log"
+
+# Define the temporary file path
+TMP_DIR="/tmp/snapshots-manager"
+
+# Get current date and time for snapshot naming
+NEW_SNAPSHOT_DATETIME=$(date +"%Y-%m-%dT%H:%M:%S")
+
+# Set pool name and optional parameters
+POOL="$1"
+MIN_FREE_SPACE_GB="${2:-200}"
+MINIMUM_DAYS_TO_KEEP="${3:-30}"
+MINIMUM_DAYS_TO_KEEP_INTRADIARY="${4:-7}"
+
+DAYS_TO_KEEP_EPOCH=$(date -d "-${MINIMUM_DAYS_TO_KEEP} days" +"%s")
+DAYS_TO_KEEP_INTRADIARY_EPOCH=$(date -d "-${MINIMUM_DAYS_TO_KEEP_INTRADIARY} days" +"%s")
+
+# Function to log messages with timestamps
+log_message() {
+    echo "$(date +"%Y-%m-%dT%H:%M:%S"): $1" | tee -a "$LOG_FILE"
+}
+
+# Function to create a snapshot with the current datetime
+create_snapshot() {
     log_message "Creating snapshot for dataset: $1"
-    zfs snapshot "$1@$new_snapshots_datetime"
+    zfs snapshot "$1@$NEW_SNAPSHOT_DATETIME"
 }
 
-# Function to delete a specified snapshot.
-function delete_snapshot() {
+# Function to delete a specified snapshot
+delete_snapshot() {
     log_message "Deleting snapshot $1"
     zfs destroy "$1"
 }
 
-# Function to recalculate free space in the pool and convert it to GB.
-function recalculate_free_space() {
-    # Extract available space for the pool.
-    free_space=$(zfs list -o available "$pool" | tail -n 1)
-    free_space_amount=$(echo "$free_space" | grep -E -o '[0-9\.]+')
-    # Extract the unit of the available space (e.g., T for TB).
-    free_space_unit=$(echo "$free_space" | grep -E -o '[A-Z]$')
-    # Convert the space to GB if necessary.
+# Function to recalculate free space in the pool and convert it to GB
+recalculate_free_space() {
+    local free_space free_space_amount free_space_unit
+
+    free_space=$(zfs list -o available "$POOL" | tail -n 1)
+    free_space_amount=$(echo "$free_space" | grep -Eo '[0-9\.]+')
+    free_space_unit=$(echo "$free_space" | grep -Eo '[A-Z]$')
+
     if [[ "$free_space_unit" == "T" ]]; then
-        free_space_gb=$(echo "$free_space_amount" "*" "1024" | bc | grep -E -o '^[0-9]+')
+        free_space_gb=$(echo "$free_space_amount * 1024" | bc)
     else
-        free_space_gb=$(echo "$free_space_amount" | bc | grep -E -o '^[0-9]+')
+        free_space_gb=$(echo "$free_space_amount" | bc)
     fi
-    echo
-    log_message "Available space in $pool: ${free_space_gb}G"
+
+    free_space_gb=$(printf "%.0f" "$free_space_gb")
+    log_message "Available space in $POOL: ${free_space_gb}G"
 }
 
-# Function to delete old snapshots if the free space is below the threshold.
-function delete_old_snapshots() {
-    if [[ "$free_space_gb" -lt "$min_free_space_gb" ]]; then
+# Function to delete old snapshots if the free space is below the threshold
+delete_old_snapshots() {
+    recalculate_free_space
+    if [[ "$free_space_gb" -lt "$MIN_FREE_SPACE_GB" ]]; then
         log_message "Deleting old snapshots to free space..."
-        echo
-        # List all snapshots, sort them by creation time, and write to a file.
-        zfs list -t snapshot -p -o creation,name | grep -E '^[0-9]' | sort -n > "$tmp_dir/snapshots.txt"
-        snapshots_count=$(wc -l < "$tmp_dir/snapshots.txt")
-        # Check if there are any snapshots to delete.
+
+        zfs list -t snapshot -p -o creation,name | grep -E '^[0-9]' | sort -n > "$TMP_DIR/snapshots.txt"
+        local snapshots_count snapshots_current_datetime snapshot_line snapshot_datetime snapshot_name
+
+        snapshots_count=$(wc -l < "$TMP_DIR/snapshots.txt")
+
         if [ "$snapshots_count" -gt 0 ]; then
-            snapshots_current_datetime=$(head -n 1 "$tmp_dir/snapshots.txt" | grep -E -o '^[0-9]+')
-            # Read through the list of snapshots and delete as needed.
+            snapshots_current_datetime=$(head -n 1 "$TMP_DIR/snapshots.txt" | grep -Eo '^[0-9]+')
+
             while read -r snapshot_line; do
-                # Check if the snapshot is older than the minimum days to keep.
-                if [[ $(echo "$snapshot_line" | grep -E -o '^[0-9]+') -gt "$days_to_keep_epoch" ]]; then
-                    log_message "Minimum $minimum_days_to_keep days to keep exceeded."
+                if [[ $(echo "$snapshot_line" | grep -Eo '^[0-9]+') -gt "$DAYS_TO_KEEP_EPOCH" ]]; then
+                    log_message "Minimum $MINIMUM_DAYS_TO_KEEP days to keep exceeded."
                     break
                 fi
-                snapshot_datetime=$(echo "$snapshot_line" | grep -E -o '^[0-9]+')
-                snapshot_name=$(echo "$snapshot_line" | grep -E -o '[^@^ ]+@[^ ]+$')
+
+                snapshot_datetime=$(echo "$snapshot_line" | grep -Eo '^[0-9]+')
+                snapshot_name=$(echo "$snapshot_line" | grep -Eo '[^@^ ]+@[^ ]+$')
+
                 if [[ "$snapshot_datetime" -gt "$snapshots_current_datetime" ]]; then
-                    echo
                     log_message "Checking free space..."
                     wait
                     sleep 5
                     recalculate_free_space
                     snapshots_current_datetime="$snapshot_datetime"
                 fi
-                if [[ "$free_space_gb" -lt "$min_free_space_gb" ]]; then
+
+                if [[ "$free_space_gb" -lt "$MIN_FREE_SPACE_GB" ]]; then
                     delete_snapshot "$snapshot_name" &
                 else
-                    echo
                     log_message "Adequate free space achieved."
                     break
                 fi
-            done < "$tmp_dir/snapshots.txt"
+            done < "$TMP_DIR/snapshots.txt"
         else
             log_message "No snapshots found. Consider freeing some space as pool performance may be degraded."
         fi
     fi
 }
 
-function delete_intradiary_snapshots() {
-    log_message "Deleting intradiary snapshots older than ${minimum_days_to_keep_intradiary} days..."
-    # List all snapshots, sort them by creation time, and write to a file.
-    zfs list -o name | grep -Ev '^NAME$' > "${tmp_dir}/datasets.txt"
+# Function to delete intradiary snapshots older than the minimum days to keep
+delete_intradiary_snapshots() {
+    log_message "Deleting intradiary snapshots older than ${MINIMUM_DAYS_TO_KEEP_INTRADIARY} days..."
+
+    zfs list -o name | grep -Ev '^NAME$' > "${TMP_DIR}/datasets.txt"
+
     while read -r dataset; do
-        zfs list -t snapshot -p -o creation,name | grep -E '^[0-9]' | sort -n > "${tmp_dir}/snapshots.txt"
-        grep -E "${dataset}@[^ ]+$" "${tmp_dir}/snapshots.txt" | rev | cut -d@ -f1 | cut -dT -f2 | rev | sort | uniq > "${tmp_dir}/snapshot-dates.txt"
+        zfs list -t snapshot -p -o creation,name | grep -E '^[0-9]' | sort -n > "${TMP_DIR}/snapshots.txt"
+        grep -E "${dataset}@[^ ]+$" "${TMP_DIR}/snapshots.txt" | rev | cut -d@ -f1 | cut -dT -f2 | rev | sort | uniq > "${TMP_DIR}/snapshot-dates.txt"
+
         while read -r snapshots_date; do
-            grep -F "${dataset}@${snapshots_date}" "${tmp_dir}/snapshots.txt" | head -n -1 | \
-            while read -r snapshot_line; do
-                snapshot_epoch="$(echo "$snapshot_line" | grep -o -E '^[0-9]+')"
-                if [[ "$snapshot_epoch" -lt "$days_to_keep_intradiary_epoch" ]]; then
-                    snapshot="$(echo "$snapshot_line" | rev | grep -o -E "^[^@]+@[^ ]+" | rev)"
+            grep -F "${dataset}@${snapshots_date}" "${TMP_DIR}/snapshots.txt" | head -n -1 | while read -r snapshot_line; do
+                local snapshot_epoch snapshot
+
+                snapshot_epoch=$(echo "$snapshot_line" | grep -o -E '^[0-9]+')
+
+                if [[ "$snapshot_epoch" -lt "$DAYS_TO_KEEP_INTRADIARY_EPOCH" ]]; then
+                    snapshot=$(echo "$snapshot_line" | rev | grep -o -E "^[^@]+@[^ ]+" | rev)
                     log_message "Removing outdated intradiary snapshot: ${snapshot}"
                     zfs destroy "${snapshot}"
                 fi
             done
-        done < "${tmp_dir}/snapshot-dates.txt"
-    done < "$tmp_dir/datasets.txt"
+        done < "${TMP_DIR}/snapshot-dates.txt"
+    done < "$TMP_DIR/datasets.txt"
 }
 
-# Main function to coordinate snapshot management.
-function main() {
-    touch "$log_file"
-    chown root:root "$log_file"
-    chmod 640 "$log_file"
-    rm -rf "${tmp_dir}"
-    mkdir -p "$tmp_dir"
+# Main function to coordinate snapshot management
+main() {
+    touch "$LOG_FILE"
+    chown root:root "$LOG_FILE"
+    chmod 640 "$LOG_FILE"
+
+    rm -rf "${TMP_DIR}"
+    mkdir -p "$TMP_DIR"
+
     recalculate_free_space
     delete_intradiary_snapshots
     delete_old_snapshots
-    if [ "$free_space_gb" -lt "$min_free_space_gb" ]; then
-        echo
+
+    if [ "$free_space_gb" -lt "$MIN_FREE_SPACE_GB" ]; then
         log_message "Couldn't free up enough space by deleting old snapshots. Consider freeing some space as pool performance may be degraded."
         log_message "Free space: ${free_space_gb}G"
     fi
-    # Create snapshots for each dataset in the pool.
-    zfs list | grep -E -o "^${pool}[^ ]*" | while read -r dataset; do
+
+    zfs list | grep -E -o "^${POOL}[^ ]*" | while read -r dataset; do
         create_snapshot "$dataset" &
-        log_message "Snapshot created: $dataset@$new_snapshots_datetime"
+        log_message "Snapshot created: $dataset@$NEW_SNAPSHOT_DATETIME"
     done
-    # Wait for all background processes to finish.
+
     wait
 }
 
-# Call the main function to execute the script.
+# Execute the main function
 main
 
-# Let's clear tmp directory.
-rm -rf "${tmp_dir}"
+# Clean up temporary directory
+rm -rf "${TMP_DIR}"
